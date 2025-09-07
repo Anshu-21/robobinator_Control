@@ -1,0 +1,361 @@
+#include <Adafruit_LiquidCrystal.h>
+
+/**
+   Class to represent a debounced button for Arduino.
+
+   This class facilitates button click detection, incorporating a debounce mechanism
+   to ensure stable button state readings.
+
+   @param pin Digital pin of Arduino to which the button is connected.
+   @param debounceDelay Debounce time in milliseconds (default: 50 ms).
+*/
+class Button
+{
+private:
+  byte pin;
+  bool lastState;
+  bool status;
+
+  unsigned long lastDebounceTime = 0;
+  unsigned long debounceDelay = 50;
+
+public:
+  Button(byte pin, unsigned long debounceDelay = 50)
+  {
+    this->pin = pin;
+    pinMode(pin, INPUT);
+    this->lastState = digitalRead(pin);
+    this->debounceDelay = debounceDelay;
+  }
+
+  /**
+     Checks if the button has been clicked, using debounce for stable readings.
+
+     This function checks the current state of the button and uses debounce to ensure
+     that only valid clicks are detected.
+
+     @return true if a valid click was detected, false otherwise.
+  */
+  bool isClicked()
+  {
+    bool currentState = digitalRead(this->pin);
+
+    if ((millis() - lastDebounceTime) >= debounceDelay && currentState == HIGH && this->lastState == LOW)
+      this->status = true;
+    else
+      this->status = false;
+
+    if (currentState != lastState)
+      this->lastDebounceTime = millis();
+
+    this->lastState = currentState;
+    return this->status;
+  }
+};
+
+class Robotic_Arm
+{
+private:
+  byte claw;
+  byte base;
+  byte shoulder;
+  byte elbow;
+  bool working = false;
+  Adafruit_LiquidCrystal *lcd;
+  unsigned long lastMoveTime = 0;
+  int moveStep = 0;
+
+public:
+  Robotic_Arm(byte claw, byte base, byte shoulder, byte elbow, Adafruit_LiquidCrystal *lcd)
+  {
+    this->claw = claw;
+    pinMode(claw, OUTPUT);
+
+    this->base = base;
+    pinMode(base, OUTPUT);
+
+    this->shoulder = shoulder;
+    pinMode(shoulder, OUTPUT);
+
+    this->elbow = elbow;
+    pinMode(elbow, OUTPUT);
+
+    this->lcd = lcd;
+  }
+
+  void move_claw(int angle)
+  {
+    analogWrite(claw, angle);
+  }
+
+  void move_base(int angle)
+  {
+    analogWrite(base, angle);
+  }
+
+  void move_shoulder(int angle)
+  {
+    analogWrite(shoulder, angle);
+  }
+
+  void move_elbow(int angle)
+  {
+    analogWrite(elbow, angle);
+  }
+
+  void move_to_position(int base_angle, int shoulder_angle, int elbow_angle, int claw_angle, int waiting_time = 200)
+  {
+    unsigned long currentMillis = millis();
+
+    switch (moveStep)
+    {
+    case 0:
+      this->move_base(base_angle);
+      lastMoveTime = currentMillis;
+      moveStep++;
+      break;
+    case 1:
+      if (currentMillis - lastMoveTime >= waiting_time)
+      {
+        this->move_shoulder(shoulder_angle);
+        lastMoveTime = currentMillis;
+        moveStep++;
+      }
+      break;
+    case 2:
+      if (currentMillis - lastMoveTime >= waiting_time)
+      {
+        this->move_elbow(elbow_angle);
+        lastMoveTime = currentMillis;
+        moveStep++;
+      }
+      break;
+    case 3:
+      if (currentMillis - lastMoveTime >= waiting_time)
+      {
+        this->move_claw(claw_angle);
+        lastMoveTime = currentMillis;
+        moveStep = 0;
+      }
+      break;
+    }
+  }
+
+  bool isMovementComplete()
+  {
+    return moveStep == 0;
+  }
+
+  void update_lcd(const char *status)
+  {
+    lcd->clear();
+    lcd->setCursor(0, 0);
+    lcd->print(status);
+  }
+
+  void update_piece_status(bool piece_present)
+  {
+    lcd->setCursor(0, 1);
+    if (piece_present)
+      lcd->print("Peca: Presente ");
+    else
+      lcd->print("Peca: Ausente  ");
+  }
+
+  void update_placement_status(const char *location)
+  {
+    lcd->clear();
+    lcd->setCursor(0, 1);
+    lcd->print(location);
+  }
+};
+
+long readUltrasonicDistance(int triggerPin, int echoPin)
+{
+  pinMode(triggerPin, OUTPUT);
+  digitalWrite(triggerPin, LOW);
+  delayMicroseconds(2);
+  digitalWrite(triggerPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(triggerPin, LOW);
+  pinMode(echoPin, INPUT);
+  return pulseIn(echoPin, HIGH);
+}
+
+bool isEmergency = false;
+void handleEmergency()
+{
+  isEmergency = !isEmergency;
+}
+
+#define Emergency 2
+Button start(4);
+
+Adafruit_LiquidCrystal lcd_1(0);
+Robotic_Arm arm(11, 10, 9, 3, &lcd_1);
+
+#define Running_LED 13
+bool isRunning = false;
+
+int claw_states[] = {30, 90};          // 30 : aberta, 90 : fechada
+int base_states[] = {10, 100};         // 10 : mesa, 100 : esteira
+int elbow_states[] = {10, 55, 100};    // 10 : mesa, 55 : meio, 100 : esteira
+int shoulder_states[] = {10, 55, 100}; // 10 : mesa, 55 : meio, 100 : esteira
+
+enum ArmState
+{
+  NONE,
+  WAITING,
+  MOVE_TO_CONVEYOR,
+  GRAB_PIECE,
+  LIFT_PIECE,
+  MOVE_TO_TABLE,
+  LOWER_PIECE,
+  RELEASE_PIECE,
+  RETURN_TO_START
+};
+
+ArmState armState = NONE;
+unsigned long stateStartTime = 0;
+int waiting_time = 300;
+
+void setup()
+{
+  lcd_1.begin(16, 2);
+  pinMode(Running_LED, OUTPUT);
+  Serial.begin(9600);
+  attachInterrupt(digitalPinToInterrupt(Emergency), handleEmergency, CHANGE);
+}
+
+void loop()
+{
+  if (isEmergency)
+  {
+    arm.update_lcd("Status: Emergency");
+    Serial.println(isEmergency);
+  }
+
+  else
+  {
+    if (start.isClicked())
+    {
+      if (armState == NONE)
+        armState = WAITING;
+      else
+        armState = NONE;
+
+      isRunning = !isRunning;
+    }
+
+    if (isRunning)
+    {
+      if (armState != WAITING)
+        arm.update_lcd("Status: Running");
+      else
+        arm.update_lcd("Status: Waiting");
+
+      if (0.01723 * readUltrasonicDistance(7, 7) < 60)
+      {
+        arm.update_piece_status(true);
+        Serial.println("Objeto detectado perto do sensor!");    // Adiciona mensagem serial
+        Serial.println(0.01723 * readUltrasonicDistance(7, 7)); // Adiciona mensagem serial
+      }
+      else
+        arm.update_piece_status(false);
+
+      unsigned long currentMillis = millis();
+
+      switch (armState)
+      {
+      case WAITING:
+        if (0.01723 * readUltrasonicDistance(7, 7) < 60)
+        {
+          armState = MOVE_TO_CONVEYOR;
+          stateStartTime = currentMillis;
+        }
+        break;
+      case MOVE_TO_CONVEYOR:
+        if (currentMillis - stateStartTime >= waiting_time)
+        {
+          arm.move_to_position(base_states[1], shoulder_states[2], elbow_states[2], claw_states[0]);
+          if (arm.isMovementComplete())
+          {
+            armState = GRAB_PIECE;
+            stateStartTime = currentMillis;
+          }
+        }
+        break;
+      case GRAB_PIECE:
+        if (currentMillis - stateStartTime >= waiting_time)
+        {
+          arm.move_to_position(base_states[1], shoulder_states[2], elbow_states[2], claw_states[1]);
+          if (arm.isMovementComplete())
+          {
+            armState = LIFT_PIECE;
+            stateStartTime = currentMillis;
+          }
+        }
+        break;
+      case LIFT_PIECE:
+        if (currentMillis - stateStartTime >= 500)
+        {
+          arm.move_to_position(base_states[1], shoulder_states[1], elbow_states[1], claw_states[1]);
+          if (arm.isMovementComplete())
+          {
+            armState = MOVE_TO_TABLE;
+            stateStartTime = currentMillis;
+          }
+        }
+        break;
+      case MOVE_TO_TABLE:
+        if (currentMillis - stateStartTime >= 500)
+        {
+          arm.move_to_position(base_states[0], shoulder_states[1], elbow_states[1], claw_states[1]);
+          if (arm.isMovementComplete())
+          {
+            armState = LOWER_PIECE;
+            stateStartTime = currentMillis;
+          }
+        }
+        break;
+      case LOWER_PIECE:
+        if (currentMillis - stateStartTime >= 500)
+        {
+          arm.move_to_position(base_states[0], shoulder_states[0], elbow_states[0], claw_states[1]);
+          if (arm.isMovementComplete())
+          {
+            armState = RELEASE_PIECE;
+            stateStartTime = currentMillis;
+          }
+        }
+        break;
+      case RELEASE_PIECE:
+        if (currentMillis - stateStartTime >= 500)
+        {
+          arm.move_to_position(base_states[0], shoulder_states[0], elbow_states[0], claw_states[0]);
+          if (arm.isMovementComplete())
+          {
+            armState = RETURN_TO_START;
+            stateStartTime = currentMillis;
+          }
+        }
+        break;
+      case RETURN_TO_START:
+        if (currentMillis - stateStartTime >= 500)
+        {
+          arm.move_to_position(base_states[0], shoulder_states[1], elbow_states[1], claw_states[0]);
+          if (arm.isMovementComplete())
+          {
+            arm.update_placement_status("Elevador: Peca");
+            armState = WAITING;
+          }
+        }
+        break;
+      }
+    }
+    else
+      arm.update_lcd("Status: Stopped");
+
+    digitalWrite(Running_LED, isRunning);
+  }
+}
